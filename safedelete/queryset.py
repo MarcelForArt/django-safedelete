@@ -1,8 +1,12 @@
 from distutils.version import LooseVersion
+from functools import partial, reduce
 
 import django
 from django.db.models import query
 from django.db.models.query_utils import Q
+from django.db.models.constants import LOOKUP_SEP
+from django.db.models import Max, Min, F
+from django.utils.module_loading import import_string
 
 from .config import (DELETED_INVISIBLE, DELETED_ONLY_VISIBLE, DELETED_VISIBLE,
                      DELETED_VISIBLE_BY_FIELD)
@@ -157,3 +161,130 @@ class SafeDeleteQueryset(query.QuerySet):
         if hasattr(self, '_safedelete_force_visibility'):
             clone._safedelete_force_visibility = self._safedelete_force_visibility
         return clone
+
+
+def get_lookup_value(obj, field):
+    return reduce(lambda i, f: getattr(i, f), field.split(LOOKUP_SEP), obj)
+
+
+class OrderedSafeDeleteQueryset(SafeDeleteQueryset):
+    """
+    # ADDED BY LEE
+
+    This extends SafeDeleteQueryset with methods from OrderedModelQuerySet
+    of the django-ordered-model package, so that we can have both proper ordering and
+    safe-deletion
+    """
+
+    def _get_order_field_name(self):
+        return self.model.order_field_name
+
+    def _get_order_field_lookup(self, lookup):
+        order_field_name = self._get_order_field_name()
+        return LOOKUP_SEP.join([order_field_name, lookup])
+
+    def _get_order_with_respect_to(self):
+        model = self.model
+        order_with_respect_to = model.order_with_respect_to
+        if isinstance(order_with_respect_to, str):
+            order_with_respect_to = (order_with_respect_to,)
+        if order_with_respect_to is None:
+            raise AssertionError(
+                (
+                    'ordered model admin "{0}" has not specified "order_with_respect_to"; note that this '
+                    "should go in the model body, and is not to be confused with the Meta property of the same name, "
+                    "which is independent Django functionality"
+                ).format(model)
+            )
+        return order_with_respect_to
+
+    def get_max_order(self):
+        order_field_name = self._get_order_field_name()
+        return self.aggregate(Max(order_field_name)).get(
+            self._get_order_field_lookup("max")
+        )
+
+    def get_min_order(self):
+        order_field_name = self._get_order_field_name()
+        return self.aggregate(Min(order_field_name)).get(
+            self._get_order_field_lookup("min")
+        )
+
+    def get_next_order(self):
+        order = self.get_max_order()
+        return order + 1 if order is not None else 0
+
+    def above(self, order, inclusive=False):
+        """Filter items above order."""
+        lookup = "gte" if inclusive else "gt"
+        return self.filter(**{self._get_order_field_lookup(lookup): order})
+
+    def above_instance(self, ref, inclusive=False):
+        """Filter items above ref's order."""
+        order_field_name = self._get_order_field_name()
+        order = getattr(ref, order_field_name)
+        return self.above(order, inclusive=inclusive)
+
+    def below(self, order, inclusive=False):
+        """Filter items below order."""
+        lookup = "lte" if inclusive else "lt"
+        return self.filter(**{self._get_order_field_lookup(lookup): order})
+
+    def below_instance(self, ref, inclusive=False):
+        """Filter items below ref's order."""
+        order_field_name = self._get_order_field_name()
+        order = getattr(ref, order_field_name)
+        return self.below(order, inclusive=inclusive)
+
+    def decrease_order(self, **extra_kwargs):
+        """Decrease `order_field_name` value by 1."""
+        order_field_name = self._get_order_field_name()
+        update_kwargs = {order_field_name: F(order_field_name) - 1}
+        if extra_kwargs:
+            update_kwargs.update(extra_kwargs)
+        return self.update(**update_kwargs)
+
+    def increase_order(self, **extra_kwargs):
+        """Increase `order_field_name` value by 1."""
+        order_field_name = self._get_order_field_name()
+        update_kwargs = {order_field_name: F(order_field_name) + 1}
+        if extra_kwargs:
+            update_kwargs.update(extra_kwargs)
+        return self.update(**update_kwargs)
+
+    def bulk_create(self, objs, batch_size=None):
+        order_field_name = self._get_order_field_name()
+        order_with_respect_to = self.model.order_with_respect_to
+        objs = list(objs)
+        if order_with_respect_to:
+            order_with_respect_to_mapping = {}
+            order_with_respect_to = self._get_order_with_respect_to()
+            for obj in objs:
+                key = tuple(
+                    get_lookup_value(obj, field) for field in order_with_respect_to
+                )
+                if key in order_with_respect_to_mapping:
+                    order_with_respect_to_mapping[key] += 1
+                else:
+                    order_with_respect_to_mapping[
+                        key
+                    ] = self.filter_by_order_with_respect_to(obj).get_next_order()
+                setattr(obj, order_field_name, order_with_respect_to_mapping[key])
+        else:
+            for order, obj in enumerate(objs, self.get_next_order()):
+                setattr(obj, order_field_name, order)
+        return super().bulk_create(objs, batch_size=batch_size)
+
+    def _get_order_with_respect_to_filter_kwargs(self, ref):
+        order_with_respect_to = self._get_order_with_respect_to()
+        _get_lookup_value = partial(get_lookup_value, ref)
+        return {field: _get_lookup_value(field) for field in order_with_respect_to}
+
+    _get_order_with_respect_to_filter_kwargs.queryset_only = False
+
+    def filter_by_order_with_respect_to(self, ref):
+        order_with_respect_to = self.model.order_with_respect_to
+        if order_with_respect_to:
+            filter_kwargs = self._get_order_with_respect_to_filter_kwargs(ref)
+            return self.filter(**filter_kwargs)
+        return self

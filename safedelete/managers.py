@@ -2,7 +2,7 @@ from django.conf import settings
 from django.db import models
 
 from .config import DELETED_INVISIBLE, DELETED_ONLY_VISIBLE, DELETED_VISIBLE, SOFT_DELETE, SOFT_DELETE_CASCADE
-from .queryset import SafeDeleteQueryset
+from .queryset import SafeDeleteQueryset, OrderedSafeDeleteQueryset
 
 
 class SafeDeleteManager(models.Manager):
@@ -164,3 +164,28 @@ class SafeDeleteDeletedManager(SafeDeleteManager):
     """
 
     _safedelete_visibility = DELETED_ONLY_VISIBLE
+
+
+class OrderedSafeDeleteManager(SafeDeleteManager):
+    # ADDED BY LEE
+    _queryset_class = OrderedSafeDeleteQueryset
+
+
+class OrderedSafeDeleteAllManager(SafeDeleteAllManager):
+    """SafeDeleteManager with ``_safedelete_visibility`` set to ``DELETED_VISIBLE``.
+
+    .. note::
+        This is used in :py:attr:`safedelete.models.SafeDeleteModel.all_objects`.
+    """
+    # ADDED BY LEE
+    _queryset_class = OrderedSafeDeleteQueryset
+
+
+class OrderedSafeDeleteDeletedManager(SafeDeleteDeletedManager):
+    """SafeDeleteManager with ``_safedelete_visibility`` set to ``DELETED_ONLY_VISIBLE``.
+
+    .. note::
+        This is used in :py:attr:`safedelete.models.SafeDeleteModel.deleted_objects`.
+    """
+    # ADDED BY LEE
+    _queryset_class = OrderedSafeDeleteQueryset
